@@ -19,6 +19,8 @@ Together, **EnigMano** embodies *“The Hand of Mystery”* — a silent guardia
 This GitHub Actions workflow automates deploying **EnigMano** instances — Windows fortress environments orchestrated with stealth and precision.  
 Trigger it manually, input your **instance number**, and let the silent hand execute the mission. ✋🌀
 
+A demo video of this project can be accessed here: https://bit.ly/Free-RDP-V2
+
 ---
 
 ## ⚡ Fortress Overview 🏰
