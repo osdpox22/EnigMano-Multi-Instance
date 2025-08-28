@@ -6,12 +6,15 @@
 
 ---
 
-**EnigMano 🌀✋** is forged from two powerful concepts:  
-- **Enigma 🌀** — a puzzle wrapped in shadows, precision, and quiet strength.  
-- **Mano ✋** — the “hand” that commands, controls, and executes with unwavering resolve.  
+**EnigMano 🌀✋** is forged from two powerful concepts:
+
+* **Enigma 🌀** — a puzzle wrapped in shadows, precision, and quiet strength.
+* **Mano ✋** — the “hand” that commands, controls, and executes with unwavering resolve.
 
 Together, **EnigMano** embodies *“The Hand of Mystery”* — a silent guardian orchestrating the life and legacy of every fortress instance with masterful precision and hidden grace. 🛡️
 
+> **Project Focus:** This repository is part of the EnigMano ecosystem, dedicated to creating **RDP-enabled, fully automated Windows 11 instances**. Each instance is pre-configured, secure, and ready for remote deployment and operations.
+> 
 ---
 
 ## 🔥 What Is This? 🕵️‍♂️
