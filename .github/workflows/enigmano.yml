@@ -1,4 +1,5 @@
 name: "⚡ EnigMano Instance Deployment"
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,10 +7,12 @@ on:
         description: "Instance number to deploy (e.g., 1, 2, 3...)"
         required: true
         default: "1"
+
 jobs:
   deploy-enigmano:
     name: "🚀 Deploy EnigMano Instance ${{ github.event.inputs.INSTANCE }}"
     runs-on: windows-latest
+
     env:
       INSTANCE_ID: ${{ github.event.inputs.INSTANCE }}
       SECRET_SHAHZAIB: ${{ secrets.SECRET_SHAHZAIB }}
@@ -17,8 +20,7 @@ jobs:
       REPO: ${{ github.repository }}
       WORKFLOW_FILE: "enigmano.yml"
       DEPLOYMENT_ID: ${{ github.run_id }}
-      MEGA_EMAIL: ${{ secrets.MEGA_EMAIL }}
-      MEGA_PASSWORD: ${{ secrets.MEGA_PASSWORD }}
+
     steps:
       - name: 📌 Deployment Parameters
         shell: pwsh
@@ -31,7 +33,7 @@ jobs:
           Write-Host "🔁 Deployment Workflow   : $env:WORKFLOW_FILE"
           Write-Host "🆔 Deployment ID         : $env:DEPLOYMENT_ID"
           Write-Host "==============================================="
-      
+
       - name: 🔐 Validate Secrets
         shell: pwsh
         run: |
@@ -43,16 +45,8 @@ jobs:
             Write-Error "❌ Missing Ngrok Auth Token: NGROK_SHAHZAIB"
             exit 1
           }
-          if (-not $env:MEGA_EMAIL) {
-            Write-Error "❌ Missing MEGA Email: MEGA_EMAIL"
-            exit 1
-          }
-          if (-not $env:MEGA_PASSWORD) {
-            Write-Error "❌ Missing MEGA Password: MEGA_PASSWORD"
-            exit 1
-          }
           Write-Host "✅ All required secrets validated successfully"
-      
+
       - name: 📥 Download EnigMano-instance.ps1
         shell: pwsh
         run: |
@@ -64,108 +58,17 @@ jobs:
             exit 1
           }
           Write-Host "✅ EnigMano-instance.ps1 downloaded successfully"
-      
-      - name: 📦 Install MEGA CMD
-        shell: pwsh
-        run: |
-          Write-Host "🌐 Downloading MEGA CMD installer..."
-          Invoke-WebRequest -Uri "https://mega.nz/cmd/MEGAsyncSetup64.exe" -OutFile "MEGAsyncSetup64.exe" -UseBasicParsing
-          Write-Host "🔧 Installing MEGA CMD silently..."
-          Start-Process -FilePath ".\MEGAsyncSetup64.exe" -ArgumentList "/S" -Wait
-          Write-Host "✅ MEGA CMD installation completed"
-      
-      - name: 📥 Download Bot ZIP from MEGA
-        shell: pwsh
-        run: |
-          # Wait for MEGA CMD to initialize
-          Start-Sleep -Seconds 15
-          
-          # Log into MEGA
-          Write-Host "🔑 Logging into MEGA..."
-          & "C:\Program Files\MEGA\MEGAcmd\mega-login" $env:MEGA_EMAIL $env:MEGA_PASSWORD
-          
-          # Create Downloads directory if it doesn't exist
-          $downloadsPath = "$env:USERPROFILE\Downloads"
-          if (!(Test-Path $downloadsPath)) {
-            New-Item -ItemType Directory -Force -Path $downloadsPath
-          }
-          
-          # Download the bot ZIP file to Downloads folder
-          Write-Host "📥 Downloading bot ZIP file to Downloads folder..."
-          & "C:\Program Files\MEGA\MEGAcmd\mega-get" "/bot.zip" $downloadsPath
-          
-          # Verify download
-          $zipPath = "$downloadsPath\bot.zip"
-          if (!(Test-Path $zipPath)) {
-            Write-Error "❌ Failed to download bot.zip from MEGA"
-            exit 1
-          }
-          Write-Host "✅ Bot ZIP downloaded to: $zipPath"
-      
-      - name: 📂 Extract Bot ZIP
-        shell: pwsh
-        run: |
-          $downloadsPath = "$env:USERPROFILE\Downloads"
-          $zipPath = "$downloadsPath\bot.zip"
-          $extractPath = "$downloadsPath\bot"
-          
-          # Create extraction directory
-          New-Item -ItemType Directory -Force -Path $extractPath
-          
-          # Extract the ZIP file
-          Write-Host "📂 Extracting bot.zip to $extractPath..."
-          try {
-            Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-            Write-Host "✅ Bot ZIP extracted successfully"
-          } catch {
-            Write-Error "❌ Failed to extract bot.zip: $_"
-            exit 1
-          }
-          
-          # Verify extraction
-          if (!(Test-Path "$extractPath\start-bots.bat")) {
-            Write-Error "❌ start-bots.bat not found after extraction"
-            exit 1
-          }
-          Write-Host "✅ Verified bot files extracted successfully"
-      
-      - name: 🪟 Create Auto-start Script
-        shell: pwsh
-        run: |
-          $downloadsPath = "$env:USERPROFILE\Downloads"
-          $botPath = "$downloadsPath\bot"
-          
-          $startupScript = @"
-          @echo off
-          echo Starting bot services...
-          cd /d "$botPath"
-          start-bots.bat
-          "@
-          
-          $startupScript | Out-File -FilePath "$botPath\auto-start.bat" -Encoding ASCII
-          
-          # Create scheduled task to run at logon
-          $action = New-ScheduledTaskAction -Execute "$botPath\auto-start.bat" -WorkingDirectory $botPath
-          $trigger = New-ScheduledTaskTrigger -AtLogon
-          $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-          
-          Register-ScheduledTask -TaskName "AutoStartBots" -Action $action -Trigger $trigger -Settings $settings -User "SYSTEM" -RunLevel Highest | Out-Null
-          
-          Write-Host "✅ Auto-start script created and scheduled"
-          Write-Host "📍 Bot location: $botPath"
-      
+
       - name: ⚔️ Execute EnigMano Instance Script
         shell: pwsh
         run: |
           Write-Host "🚦 Initiating EnigMano-instance.ps1"
           powershell.exe -ExecutionPolicy Bypass -File ".\EnigMano-instance.ps1"
-      
+
       - name: 💠 Final Status
         if: always()
         shell: pwsh
         run: |
           Write-Host "✅ EnigMano Instance $env:INSTANCE_ID completed execution."
-          Write-Host "🤖 Bot services configured to start automatically"
-          Write-Host "📁 Bot folder located at: $env:USERPROFILE\Downloads\bot"
           Write-Host "🔋 Powered by: SHAHZAIB-YT"
           Write-Host "🏁 EnigMano deployment executed with tactical precision."
