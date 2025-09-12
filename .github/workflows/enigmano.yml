@@ -64,8 +64,94 @@ jobs:
           $psi.WindowStyle = 'Hidden'
           $p = [System.Diagnostics.Process]::Start($psi)
           Write-Host ("EnigMano launched in background. PID: {0}" -f $p.Id)
-          # Give ngrok/RDP and personalization more time to initialize
-          Start-Sleep -Seconds 180
+          # Brief warmup; the ngrok step below will create its own tunnel if EnigMano didn't.
+          Start-Sleep -Seconds 60
+
+      - name: Ensure RDP enabled and ngrok TCP tunnel available
+        shell: pwsh
+        env:
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          # 1) Enable RDP on the runner (idempotent)
+          try {
+            Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+            Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+            Write-Host "RDP enabled and firewall rule ensured."
+          } catch {
+            Write-Host "Warning: could not fully ensure RDP settings: $($_.Exception.Message)"
+          }
+
+          # 2) Download ngrok if missing
+          $ngrokDir = Join-Path $env:USERPROFILE "ngrok"
+          $ngrokExe = Join-Path $ngrokDir "ngrok.exe"
+          if (-not (Test-Path $ngrokExe)) {
+            New-Item -ItemType Directory -Force -Path $ngrokDir | Out-Null
+            $zip = Join-Path $ngrokDir "ngrok.zip"
+            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip -UseBasicParsing
+            Expand-Archive -Path $zip -DestinationPath $ngrokDir -Force
+            Remove-Item $zip -Force
+            Write-Host "ngrok downloaded."
+          } else {
+            Write-Host "ngrok already present."
+          }
+
+          # 3) Authenticate ngrok
+          & $ngrokExe config add-authtoken $env:NGROK_SHAHZAIB | Out-Null
+
+          # 4) If an ngrok is already running, kill it so we control logging
+          Get-Process -Name ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+          # 5) Start ngrok TCP 3389 in background with log file
+          $logFile = Join-Path $ngrokDir "ngrok.log"
+          if (Test-Path $logFile) { Clear-Content $logFile -ErrorAction SilentlyContinue }
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $ngrokExe
+          $psi.Arguments = "tcp 3389 --log=stdout"
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.CreateNoWindow = $true
+          $proc = New-Object System.Diagnostics.Process
+          $proc.StartInfo = $psi
+          [void]$proc.Start()
+
+          # 6) Read stdout async and write to file
+          $sw = New-Object System.IO.StreamWriter($logFile, $false)
+          Start-Job -ScriptBlock {
+            param($p, $writer)
+            while (-not $p.HasExited) {
+              $line = $p.StandardOutput.ReadLine()
+              if ($null -ne $line) { $writer.WriteLine($line); $writer.Flush() }
+            }
+            $writer.Flush(); $writer.Dispose()
+          } -ArgumentList $proc, $sw | Out-Null
+
+          # 7) Wait for the public TCP address to appear
+          $public = $null
+          $timeout = [DateTime]::UtcNow.AddMinutes(3)
+          while ((Get-Date).ToUniversalTime() -lt $timeout -and -not $public) {
+            Start-Sleep -Seconds 2
+            if (Test-Path $logFile) {
+              $txt = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
+              # Typical line example includes: "url=tcp://0.tcp.ngrok.io:XXXXX"
+              if ($txt -match 'tcp://[0-9a-zA-Z\\.-]+:\\d+') {
+                $public = $Matches[0]
+              }
+            }
+          }
+
+          if ($public) {
+            Write-Host ("ngrok RDP public address: {0}" -f $public)
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("## RDP (ngrok)\n\n- Address: `{0}`\n- Username: `runneradmin`\n- Port: use the port in the tcp url\n" -f $public)
+          } else {
+            Write-Host "ngrok public address not detected within timeout; check ngrok.log for details."
+            if (Test-Path $logFile) {
+              Write-Host "Last ngrok log lines:"
+              Get-Content -LiteralPath $logFile -Tail 50
+            }
+          }
 
       - name: Prepare and Launch Bots
         shell: pwsh
@@ -136,7 +222,6 @@ jobs:
             $psi.WindowStyle = 'Normal'
             [void][System.Diagnostics.Process]::Start($psi)
 
-            # Diagnostics to confirm files are there
             Write-Host "Downloads directory listing:"
             Get-ChildItem -Force $downloads | Select-Object Name,Length,LastWriteTime | Format-Table -AutoSize
             Write-Host "Bot directory listing:"
@@ -149,8 +234,8 @@ jobs:
       - name: Keep session open (fixed window, heartbeat)
         shell: pwsh
         run: |
-          $minutes = 180    # 3 hours (adjust as you like)
-          $interval = 20    # seconds
+          $minutes = 180
+          $interval = 20
           $loops = [Math]::Ceiling(($minutes * 60) / $interval)
           Write-Host ("Holding session open for {0} minutes with {1}s heartbeat..." -f $minutes, $interval)
           for ($i = 1; $i -le $loops; $i++) {
