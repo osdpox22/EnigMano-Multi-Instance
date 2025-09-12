@@ -21,8 +21,7 @@ jobs:
       WORKFLOW_FILE: "enigmano.yml"
       DEPLOYMENT_ID: ${{ github.run_id }}
       # Your Bot.zip (will be extracted to C:\Users\runneradmin\Downloads\Bot)
-      BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
-
+      BOT_ZIP_URL: "https://www.dropbox.com/scl/fo/finl8oqivftlo91fmaphu/AEApbCtwKKbub_B1uDeKEXg?rlkey=4ztjd9h04dfsukww14pdujkf6&st=joradakt&dl=1" 
     steps:
       - name: 📌 Deployment Parameters
         shell: pwsh
