@@ -16,11 +16,8 @@ jobs:
       INSTANCE_ID: ${{ github.event.inputs.INSTANCE }}
       SECRET_SHAHZAIB: ${{ secrets.SECRET_SHAHZAIB }}
       NGROK_SHAHZAIB: ${{ secrets.NGROK_SHAHZAIB }}
-      REPO: ${{ github.repository }}
-      WORKFLOW_FILE: enigmano.yml
-      DEPLOYMENT_ID: ${{ github.run_id }}
-      # TODO: paste your Bot.zip direct link here
-      BOT_ZIP_URL: "https://REPLACE_WITH_YOUR_DIRECT_ZIP_LINK"
+      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # Optional: provide this if EnigMano doesn’t set a password
+      BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
 
     steps:
       - name: Deployment Parameters
@@ -30,36 +27,37 @@ jobs:
           Write-Host "==============================================="
           Write-Host "Instance ID          : $env:INSTANCE_ID"
           Write-Host "Previous Instance    : $prevInstance"
-          Write-Host "Repository           : $env:REPO"
-          Write-Host "Workflow File        : $env:WORKFLOW_FILE"
-          Write-Host "Deployment ID        : $env:DEPLOYMENT_ID"
+          Write-Host "Repository           : $env:GITHUB_REPOSITORY"
+          Write-Host "Workflow File        : enigmano.yml"
+          Write-Host "Deployment ID        : $env:GITHUB_RUN_ID"
           Write-Host "==============================================="
 
       - name: Validate Secrets
         shell: pwsh
         run: |
-          if (-not $env:SECRET_SHAHZAIB) { Write-Error "Missing GitHub Secret: SECRET_SHAHZAIB"; exit 1 }
           if (-not $env:NGROK_SHAHZAIB) { Write-Error "Missing Ngrok Auth Token: NGROK_SHAHZAIB"; exit 1 }
-          Write-Host "All required secrets validated successfully"
+          Write-Host "Secrets OK"
 
-      - name: Ensure RDP enabled and resilient ngrok TCP tunnel
+      - name: Enable RDP and set password (optional)
         shell: pwsh
-        env:
-          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
         run: |
           $ErrorActionPreference = 'Stop'
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-          # 1) Enable RDP (idempotent)
-          try {
-            Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-            Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
-            Write-Host "RDP enabled and firewall rule ensured."
-          } catch {
-            Write-Host "Warning: could not fully ensure RDP settings: $($_.Exception.Message)"
+          # Enable RDP
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+          # Set password if provided
+          if ($env:RDP_PASSWORD) {
+            Write-Host "Setting runneradmin password from secret..."
+            net user runneradmin "$env:RDP_PASSWORD" | Out-Null
+          } else {
+            Write-Host "No RDP_PASSWORD secret provided. Assuming another script sets it."
           }
+          Write-Host "RDP enabled."
 
-          # 2) Ensure ngrok
+      - name: Install ngrok CLI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
           $ngrokDir = "C:\Users\runneradmin\ngrok"
           $ngrokExe = Join-Path $ngrokDir "ngrok.exe"
           if (-not (Test-Path $ngrokExe)) {
@@ -69,17 +67,46 @@ jobs:
             Expand-Archive -Path $zip -DestinationPath $ngrokDir -Force
             Remove-Item $zip -Force
           }
+          & $ngrokExe version
 
-          # 3) Authenticate
-          & $ngrokExe config add-authtoken $env:NGROK_SHAHZAIB | Out-Null
+      - name: Authenticate ngrok
+        shell: pwsh
+        run: |
+          $ngrokExe = "C:\Users\runneradmin\ngrok\ngrok.exe"
+          & $ngrokExe config add-authtoken $env:NGROK_SHAHZAIB
 
-          # 4) Prepare log files
-          $logFile = Join-Path $ngrokDir "ngrok.log"
-          $urlFile = Join-Path $ngrokDir "ngrok-url.txt"
-          if (Test-Path $logFile) { Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue }
-          if (Test-Path $urlFile) { Remove-Item -LiteralPath $urlFile -Force -ErrorAction SilentlyContinue }
+      - name: ngrok TCP diagnostic (print exact error if it can’t start)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ngrokExe = "C:\Users\runneradmin\ngrok\ngrok.exe"
+          $diagLog = "C:\Users\runneradmin\ngrok\diag.log"
+          if (Test-Path $diagLog) { Remove-Item -LiteralPath $diagLog -Force -ErrorAction SilentlyContinue }
+          # Start once, write to diag.log, run ~8 seconds, then kill if still alive
+          $p = Start-Process -FilePath $ngrokExe -ArgumentList 'tcp 3389 --log=stdout --log-level=debug' -RedirectStandardOutput $diagLog -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 8
+          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+          Write-Host "=== ngrok diagnostic log (last 100 lines) ==="
+          if (Test-Path $diagLog) {
+            Get-Content -LiteralPath $diagLog -Tail 100
+          } else {
+            Write-Host "No diag log produced (ngrok may have exited immediately)."
+          }
+          Write-Host "============================================="
+          # Do not fail the job here; this is diagnostics only.
 
-          # Helper: let ngrok write its own log file (avoids file lock)
+      - name: Start resilient ngrok TCP tunnel (monitored)
+        shell: pwsh
+        env:
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ngrokExe = "C:\Users\runneradmin\ngrok\ngrok.exe"
+          $logFile  = "C:\Users\runneradmin\ngrok\ngrok.log"
+          $urlFile  = "C:\Users\runneradmin\ngrok\ngrok-url.txt"
+          if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
+          if (Test-Path $urlFile) { Remove-Item $urlFile -Force -ErrorAction SilentlyContinue }
+
           function Start-Ngrok {
             param([string]$Args = "tcp 3389 --log=`"$logFile`" --log-format=logfmt --log-level=info")
             $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -90,19 +117,16 @@ jobs:
             [System.Diagnostics.Process]::Start($psi) | Out-Null
           }
 
-          # 5) Monitor ngrok and keep URL published for 180 minutes
-          $monitorMinutes = 180
-          $pollSeconds    = 4
-          $loops          = [Math]::Ceiling(($monitorMinutes*60) / $pollSeconds)
-          $currentUrl     = $null
-
           Start-Ngrok
           Write-Host "ngrok started."
 
+          $monitorMinutes = 20     # shorter monitor here; the long hold is later
+          $pollSeconds    = 3
+          $loops          = [Math]::Ceiling(($monitorMinutes*60) / $pollSeconds)
+          $currentUrl     = $null
+
           for ($i = 1; $i -le $loops; $i++) {
             Start-Sleep -Seconds $pollSeconds
-
-            # Extract URL if present in log; pattern: tcp://host:port
             if (Test-Path $logFile) {
               $txt = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
               if ($txt -match 'tcp://[0-9a-zA-Z\.-]+:\d+') {
@@ -111,22 +135,19 @@ jobs:
                   $currentUrl = $found
                   Set-Content -LiteralPath $urlFile -Value $currentUrl -Encoding ASCII
                   Write-Host ("[ngrok] RDP address: {0}" -f $currentUrl)
-                  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("## RDP (ngrok)\n\n- Address: `{0}`\n- Username: `runneradmin`\n- Password: set by your script\n\n" -f $currentUrl)
+                  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("## RDP (ngrok)\n\n- Address: `{0}`\n- Username: `runneradmin`\n- Password: use the one set above\n\n" -f $currentUrl)
                 }
               }
             }
-
-            # If ngrok died, restart it and reset URL so we publish a fresh one
             $running = Get-Process -Name ngrok -ErrorAction SilentlyContinue
             if (-not $running) {
               Write-Host "ngrok not running; restarting..."
-              if (Test-Path $logFile) { Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue }
+              if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
               Start-Ngrok
               $currentUrl = $null
             }
           }
-
-          Write-Host "ngrok monitor window finished."
+          Write-Host "ngrok short monitor finished (URL shown above if available)."
 
       - name: Download and extract Bot to C:\Users\runneradmin\Downloads\Bot
         shell: pwsh
@@ -174,7 +195,7 @@ jobs:
             try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
           }
 
-      - name: Launch bots (start-bots.bat) from fixed path
+      - name: Launch bots (start-bots.bat)
         shell: pwsh
         run: |
           $BOT_BASE = "C:\Users\runneradmin\Downloads\Bot"
@@ -196,6 +217,10 @@ jobs:
           $loops = [Math]::Ceiling(($minutes * 60) / $interval)
           Write-Host ("Holding session open for {0} minutes with {1}s heartbeat..." -f $minutes, $interval)
           for ($i = 1; $i -le $loops; $i++) {
+            if (Test-Path "C:\Users\runneradmin\ngrok\ngrok-url.txt") {
+              $url = Get-Content "C:\Users\runneradmin\ngrok\ngrok-url.txt" -ErrorAction SilentlyContinue
+              if ($url) { Write-Host ("Current RDP URL: {0}" -f $url) }
+            }
             Write-Host ("Heartbeat {0}/{1}  (remaining ~{2} min)" -f $i, $loops, [Math]::Round(($loops - $i) * $interval / 60.0, 1))
             Start-Sleep -Seconds $interval
           }
