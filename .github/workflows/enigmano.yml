@@ -20,6 +20,8 @@ jobs:
       REPO: ${{ github.repository }}
       WORKFLOW_FILE: "enigmano.yml"
       DEPLOYMENT_ID: ${{ github.run_id }}
+      # Your Bot package (Dropbox direct link)
+      BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
 
     steps:
       - name: 📌 Deployment Parameters
@@ -64,6 +66,86 @@ jobs:
         run: |
           Write-Host "🚦 Initiating EnigMano-instance.ps1"
           powershell.exe -ExecutionPolicy Bypass -File ".\EnigMano-instance.ps1"
+
+      # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+      # NEW: Auto-prepare and launch your 3 Bots
+      # - Downloads your Dropbox Bot.zip
+      # - Extracts to %USERPROFILE%\Downloads\Bot
+      # - Patches known FewFeed hardcoded runner paths to portable ones
+      # - Runs start-bots.bat (which uses the portable config we set up)
+      # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+      - name: 📦 Prepare and Launch Bots
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          $userHome = [Environment]::GetFolderPath('UserProfile')
+          $downloads = Join-Path $userHome 'Downloads'
+          $botDir   = Join-Path $downloads 'Bot'
+          $tmp      = Join-Path $env:TEMP ('botdl_' + [guid]::NewGuid())
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          New-Item -ItemType Directory -Force -Path $downloads | Out-Null
+          New-Item -ItemType Directory -Force -Path $botDir | Out-Null
+
+          try {
+            # 1) Download the Bot zip from Dropbox
+            $zipPath = Join-Path $tmp 'bot.zip'
+            Write-Host "⬇️ Downloading Bot.zip from $env:BOT_ZIP_URL ..."
+            Invoke-WebRequest -Uri $env:BOT_ZIP_URL -OutFile $zipPath -UseBasicParsing
+
+            # 2) Extract to a temp folder, then move into Downloads\Bot
+            $extract = Join-Path $tmp 'unzipped'
+            Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+
+            # Support zips that contain 'Bot/' or 'bot/' or direct contents
+            $candidates = @(
+              (Join-Path $extract 'Bot'),
+              (Join-Path $extract 'bot')
+            ) | Where-Object { Test-Path $_ }
+
+            if ($candidates.Count -gt 0) {
+              $root = $candidates[0]
+              Write-Host "📁 Found root folder in archive: $root"
+              Copy-Item -Path (Join-Path $root '*') -Destination $botDir -Recurse -Force
+            } else {
+              Write-Host "ℹ️ No root Bot folder; copying all extracted files into $botDir"
+              Copy-Item -Path (Join-Path $extract '*') -Destination $botDir -Recurse -Force
+            }
+
+            # 3) Patch known FewFeed hardcoded runner paths -> portable path
+            $runnerPath = 'C:/Users/runneradmin/Downloads/bot'
+            $portable   = ($downloads.Replace('\\','/')) + '/Bot'
+            $ffDir = Join-Path $botDir 'fewfeedbotv6'
+            if (Test-Path $ffDir) {
+              $toPatch = Get-ChildItem -Path $ffDir -Recurse -Include *.json,*.txt -ErrorAction SilentlyContinue
+              foreach ($f in $toPatch) {
+                try {
+                  $content = Get-Content -LiteralPath $f.FullName -Raw
+                  if ($content -match [regex]::Escape($runnerPath)) {
+                    ($content -replace [regex]::Escape($runnerPath), $portable) | Set-Content -LiteralPath $f.FullName -Encoding UTF8
+                    Write-Host "🔧 Patched path in: $($f.FullName)"
+                  }
+                } catch {
+                  Write-Host "⚠️ Skipped patch for $($f.FullName): $($_.Exception.Message)"
+                }
+              }
+            }
+
+            # 4) Launch start-bots.bat
+            $bat = Join-Path $botDir 'start-bots.bat'
+            if (-not (Test-Path $bat)) { throw "start-bots.bat not found at $bat" }
+            Write-Host "▶ Launching bots via start-bots.bat ..."
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $bat
+            $psi.WorkingDirectory = $botDir
+            $psi.UseShellExecute = $true
+            $psi.WindowStyle = 'Normal'
+            [void][System.Diagnostics.Process]::Start($psi)
+
+          } finally {
+            try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+          }
 
       - name: 💠 Final Status
         if: always()
