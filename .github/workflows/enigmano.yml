@@ -1,81 +1,31 @@
-name: "⚡ EnigMano Instance Deployment"
-
-on:
-  workflow_dispatch:
-    inputs:
-      INSTANCE:
-        description: "Instance number to deploy (e.g., 1, 2, 3...)"
-        required: true
-        default: "1"
-
-jobs:
-  deploy-enigmano:
-    name: "🚀 Deploy EnigMano Instance ${{ github.event.inputs.INSTANCE }}"
-    runs-on: windows-latest
-
-    env:
-      INSTANCE_ID: ${{ github.event.inputs.INSTANCE }}
-      SECRET_SHAHZAIB: ${{ secrets.SECRET_SHAHZAIB }}
-      NGROK_SHAHZAIB: ${{ secrets.NGROK_SHAHZAIB }}
-      REPO: ${{ github.repository }}
-      WORKFLOW_FILE: "enigmano.yml"
-      DEPLOYMENT_ID: ${{ github.run_id }}
-      # Your Bot package (Dropbox direct link)
-      BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
-
-    steps:
-      - name: 📌 Deployment Parameters
+      # Run EnigMano in the background so the workflow can continue
+      - name: ⚔️ Execute EnigMano Instance Script (background)
         shell: pwsh
         run: |
-          $prevInstance = [int]$env:INSTANCE_ID - 1
-          Write-Host "==============================================="
-          Write-Host "🔹 EnigMano Instance     : $env:INSTANCE_ID"
-          Write-Host "🔢 Previous Instance     : $prevInstance"
-          Write-Host "📦 GitHub Repository     : $env:REPO"
-          Write-Host "🔁 Deployment Workflow   : $env:WORKFLOW_FILE"
-          Write-Host "🆔 Deployment ID         : $env:DEPLOYMENT_ID"
-          Write-Host "==============================================="
+          Write-Host "🚦 Starting EnigMano-instance.ps1 in background..."
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = "powershell.exe"
+          $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File ".\EnigMano-instance.ps1"'
+          $psi.UseShellExecute = $true
+          $psi.WindowStyle = 'Hidden'
+          $p = [System.Diagnostics.Process]::Start($psi)
+          Write-Host ("EnigMano launched. PID: {0}" -f $p.Id)
+          # Give it time to initialize ngrok/RDP and personalization
+          Start-Sleep -Seconds 40
 
-      - name: 🔐 Validate Secrets
+      # Optional: quick diagnostics
+      - name: 🔎 Verify environment before bot setup
         shell: pwsh
         run: |
-          if (-not $env:SECRET_SHAHZAIB) {
-            Write-Error "❌ Missing GitHub Secret: SECRET_SHAHZAIB"
-            exit 1
-          }
-          if (-not $env:NGROK_SHAHZAIB) {
-            Write-Error "❌ Missing Ngrok Auth Token: NGROK_SHAHZAIB"
-            exit 1
-          }
-          Write-Host "✅ All required secrets validated successfully"
+          Write-Host "UserProfile:" $env:USERPROFILE
+          Write-Host "PWD:" (Get-Location).Path
+          Get-Process | Where-Object { $_.ProcessName -match 'ngrok|chrome|powershell' } | Select-Object Id,ProcessName,MainWindowTitle | Format-Table -AutoSize
 
-      - name: 📥 Download EnigMano-instance.ps1
-        shell: pwsh
-        run: |
-          $url = "https://gitlab.com/Shahzaib-YT/enigmano-multi-instance/-/raw/main/EnigMano-instance.ps1"
-          Write-Host "🌐 Downloading EnigMano-instance.ps1..."
-          Invoke-WebRequest -Uri $url -OutFile "EnigMano-instance.ps1" -UseBasicParsing
-          if (!(Test-Path "./EnigMano-instance.ps1")) {
-            Write-Error "❌ Failed to download EnigMano-instance.ps1"
-            exit 1
-          }
-          Write-Host "✅ EnigMano-instance.ps1 downloaded successfully"
-
-      - name: ⚔️ Execute EnigMano Instance Script
-        shell: pwsh
-        run: |
-          Write-Host "🚦 Initiating EnigMano-instance.ps1"
-          powershell.exe -ExecutionPolicy Bypass -File ".\EnigMano-instance.ps1"
-
-      # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-      # NEW: Auto-prepare and launch your 3 Bots
-      # - Downloads your Dropbox Bot.zip
-      # - Extracts to %USERPROFILE%\Downloads\Bot
-      # - Patches known FewFeed hardcoded runner paths to portable ones
-      # - Runs start-bots.bat (which uses the portable config we set up)
-      # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+      # Download, unzip, patch and launch your Bot bundle from Dropbox
       - name: 📦 Prepare and Launch Bots
         shell: pwsh
+        env:
+          BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -89,12 +39,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path $botDir | Out-Null
 
           try {
-            # 1) Download the Bot zip from Dropbox
+            # 1) Download Bot.zip
             $zipPath = Join-Path $tmp 'bot.zip'
             Write-Host "⬇️ Downloading Bot.zip from $env:BOT_ZIP_URL ..."
             Invoke-WebRequest -Uri $env:BOT_ZIP_URL -OutFile $zipPath -UseBasicParsing
 
-            # 2) Extract to a temp folder, then move into Downloads\Bot
+            # 2) Extract to temp, then copy into Downloads\Bot
             $extract = Join-Path $tmp 'unzipped'
             Expand-Archive -Path $zipPath -DestinationPath $extract -Force
 
@@ -113,7 +63,7 @@ jobs:
               Copy-Item -Path (Join-Path $extract '*') -Destination $botDir -Recurse -Force
             }
 
-            # 3) Patch known FewFeed hardcoded runner paths -> portable path
+            # 3) Patch FewFeed’s hardcoded runner path -> portable %USERPROFILE%\Downloads\Bot
             $runnerPath = 'C:/Users/runneradmin/Downloads/bot'
             $portable   = ($downloads.Replace('\\','/')) + '/Bot'
             $ffDir = Join-Path $botDir 'fewfeedbotv6'
@@ -132,7 +82,7 @@ jobs:
               }
             }
 
-            # 4) Launch start-bots.bat
+            # 4) Launch start-bots.bat (portable config already uses %USERPROFILE%)
             $bat = Join-Path $botDir 'start-bots.bat'
             if (-not (Test-Path $bat)) { throw "start-bots.bat not found at $bat" }
             Write-Host "▶ Launching bots via start-bots.bat ..."
@@ -147,10 +97,12 @@ jobs:
             try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
           }
 
-      - name: 💠 Final Status
-        if: always()
+      # Optional: quick check after launching
+      - name: 📋 Post-launch check
         shell: pwsh
         run: |
-          Write-Host "✅ EnigMano Instance $env:INSTANCE_ID completed execution."
-          Write-Host "🔋 Powered by: SHAHZAIB-YT"
-          Write-Host "🏁 EnigMano deployment executed with tactical precision."
+          $downloads = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
+          Write-Host "Downloads contents:"
+          Get-ChildItem $downloads -Force
+          Write-Host "`nBot folder contents:"
+          Get-ChildItem (Join-Path $downloads 'Bot') -Force
