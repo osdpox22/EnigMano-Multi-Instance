@@ -16,7 +16,7 @@ jobs:
       INSTANCE_ID: ${{ github.event.inputs.INSTANCE }}
       SECRET_SHAHZAIB: ${{ secrets.SECRET_SHAHZAIB }}
       NGROK_SHAHZAIB: ${{ secrets.NGROK_SHAHZAIB }}
-      RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}   # Optional: provide this if EnigMano doesn’t set a password
+      # Your Bot zip (Downloads\Bot target)
       BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
 
     steps:
@@ -35,119 +35,35 @@ jobs:
       - name: Validate Secrets
         shell: pwsh
         run: |
+          if (-not $env:SECRET_SHAHZAIB) { Write-Error "Missing GitHub Secret: SECRET_SHAHZAIB"; exit 1 }
           if (-not $env:NGROK_SHAHZAIB) { Write-Error "Missing Ngrok Auth Token: NGROK_SHAHZAIB"; exit 1 }
           Write-Host "Secrets OK"
 
-      - name: Enable RDP and set password (optional)
+      - name: Download EnigMano-instance.ps1
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          # Enable RDP
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
-          # Set password if provided
-          if ($env:RDP_PASSWORD) {
-            Write-Host "Setting runneradmin password from secret..."
-            net user runneradmin "$env:RDP_PASSWORD" | Out-Null
-          } else {
-            Write-Host "No RDP_PASSWORD secret provided. Assuming another script sets it."
+          $url = "https://gitlab.com/Shahzaib-YT/enigmano-multi-instance/-/raw/main/EnigMano-instance.ps1"
+          Write-Host "Downloading EnigMano-instance.ps1..."
+          Invoke-WebRequest -Uri $url -OutFile "EnigMano-instance.ps1" -UseBasicParsing
+          if (!(Test-Path "./EnigMano-instance.ps1")) {
+            Write-Error "Failed to download EnigMano-instance.ps1"
+            exit 1
           }
-          Write-Host "RDP enabled."
+          Write-Host "EnigMano-instance.ps1 downloaded successfully"
 
-      - name: Install ngrok CLI
+      # Run EnigMano in background to keep job flowing, BUT we do not touch ngrok
+      - name: Execute EnigMano Instance Script (background; EnigMano controls ngrok)
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $ngrokDir = "C:\Users\runneradmin\ngrok"
-          $ngrokExe = Join-Path $ngrokDir "ngrok.exe"
-          if (-not (Test-Path $ngrokExe)) {
-            New-Item -ItemType Directory -Force -Path $ngrokDir | Out-Null
-            $zip = Join-Path $ngrokDir "ngrok.zip"
-            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip -UseBasicParsing
-            Expand-Archive -Path $zip -DestinationPath $ngrokDir -Force
-            Remove-Item $zip -Force
-          }
-          & $ngrokExe version
-
-      - name: Authenticate ngrok
-        shell: pwsh
-        run: |
-          $ngrokExe = "C:\Users\runneradmin\ngrok\ngrok.exe"
-          & $ngrokExe config add-authtoken $env:NGROK_SHAHZAIB
-
-      - name: ngrok TCP diagnostic (print exact error if it can’t start)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ngrokExe = "C:\Users\runneradmin\ngrok\ngrok.exe"
-          $diagLog = "C:\Users\runneradmin\ngrok\diag.log"
-          if (Test-Path $diagLog) { Remove-Item -LiteralPath $diagLog -Force -ErrorAction SilentlyContinue }
-          # Start once, write to diag.log, run ~8 seconds, then kill if still alive
-          $p = Start-Process -FilePath $ngrokExe -ArgumentList 'tcp 3389 --log=stdout --log-level=debug' -RedirectStandardOutput $diagLog -PassThru -WindowStyle Hidden
-          Start-Sleep -Seconds 8
-          if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
-          Write-Host "=== ngrok diagnostic log (last 100 lines) ==="
-          if (Test-Path $diagLog) {
-            Get-Content -LiteralPath $diagLog -Tail 100
-          } else {
-            Write-Host "No diag log produced (ngrok may have exited immediately)."
-          }
-          Write-Host "============================================="
-          # Do not fail the job here; this is diagnostics only.
-
-      - name: Start resilient ngrok TCP tunnel (monitored)
-        shell: pwsh
-        env:
-          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $ngrokExe = "C:\Users\runneradmin\ngrok\ngrok.exe"
-          $logFile  = "C:\Users\runneradmin\ngrok\ngrok.log"
-          $urlFile  = "C:\Users\runneradmin\ngrok\ngrok-url.txt"
-          if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
-          if (Test-Path $urlFile) { Remove-Item $urlFile -Force -ErrorAction SilentlyContinue }
-
-          function Start-Ngrok {
-            param([string]$Args = "tcp 3389 --log=`"$logFile`" --log-format=logfmt --log-level=info")
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $ngrokExe
-            $psi.Arguments = $Args
-            $psi.UseShellExecute = $true
-            $psi.CreateNoWindow = $true
-            [System.Diagnostics.Process]::Start($psi) | Out-Null
-          }
-
-          Start-Ngrok
-          Write-Host "ngrok started."
-
-          $monitorMinutes = 20     # shorter monitor here; the long hold is later
-          $pollSeconds    = 3
-          $loops          = [Math]::Ceiling(($monitorMinutes*60) / $pollSeconds)
-          $currentUrl     = $null
-
-          for ($i = 1; $i -le $loops; $i++) {
-            Start-Sleep -Seconds $pollSeconds
-            if (Test-Path $logFile) {
-              $txt = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
-              if ($txt -match 'tcp://[0-9a-zA-Z\.-]+:\d+') {
-                $found = $Matches[0]
-                if ($found -ne $currentUrl) {
-                  $currentUrl = $found
-                  Set-Content -LiteralPath $urlFile -Value $currentUrl -Encoding ASCII
-                  Write-Host ("[ngrok] RDP address: {0}" -f $currentUrl)
-                  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("## RDP (ngrok)\n\n- Address: `{0}`\n- Username: `runneradmin`\n- Password: use the one set above\n\n" -f $currentUrl)
-                }
-              }
-            }
-            $running = Get-Process -Name ngrok -ErrorAction SilentlyContinue
-            if (-not $running) {
-              Write-Host "ngrok not running; restarting..."
-              if (Test-Path $logFile) { Remove-Item $logFile -Force -ErrorAction SilentlyContinue }
-              Start-Ngrok
-              $currentUrl = $null
-            }
-          }
-          Write-Host "ngrok short monitor finished (URL shown above if available)."
+          Write-Host "Starting EnigMano-instance.ps1 in background..."
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = "powershell.exe"
+          $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File ".\EnigMano-instance.ps1"'
+          $psi.UseShellExecute = $true
+          $psi.WindowStyle = 'Hidden'
+          [void][System.Diagnostics.Process]::Start($psi)
+          # Give EnigMano ample time to set password, enable RDP, and start ngrok
+          Start-Sleep -Seconds 180
 
       - name: Download and extract Bot to C:\Users\runneradmin\Downloads\Bot
         shell: pwsh
@@ -209,6 +125,7 @@ jobs:
           $psi.WindowStyle = 'Normal'
           [void][System.Diagnostics.Process]::Start($psi)
 
+      # Keep the runner alive so the ngrok tunnel (spawned by EnigMano) keeps running
       - name: Keep session open (fixed window, heartbeat)
         shell: pwsh
         run: |
@@ -217,22 +134,10 @@ jobs:
           $loops = [Math]::Ceiling(($minutes * 60) / $interval)
           Write-Host ("Holding session open for {0} minutes with {1}s heartbeat..." -f $minutes, $interval)
           for ($i = 1; $i -le $loops; $i++) {
-            if (Test-Path "C:\Users\runneradmin\ngrok\ngrok-url.txt") {
-              $url = Get-Content "C:\Users\runneradmin\ngrok\ngrok-url.txt" -ErrorAction SilentlyContinue
-              if ($url) { Write-Host ("Current RDP URL: {0}" -f $url) }
-            }
             Write-Host ("Heartbeat {0}/{1}  (remaining ~{2} min)" -f $i, $loops, [Math]::Round(($loops - $i) * $interval / 60.0, 1))
             Start-Sleep -Seconds $interval
           }
           Write-Host "Fixed hold complete."
-
-      - name: Upload ngrok URL file
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ngrok-url
-          path: C:\Users\runneradmin\ngrok\ngrok-url.txt
-          if-no-files-found: warn
 
       - name: Final Status
         if: always()
