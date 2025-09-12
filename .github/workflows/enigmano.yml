@@ -1,31 +1,73 @@
-      # Run EnigMano in the background so the workflow can continue
-      - name: ⚔️ Execute EnigMano Instance Script (background)
+name: EnigMano Instance Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      INSTANCE:
+        description: "Instance number to deploy (e.g., 1, 2, 3...)"
+        required: true
+        default: "1"
+
+jobs:
+  deploy-enigmano:
+    runs-on: windows-latest
+
+    env:
+      INSTANCE_ID: ${{ github.event.inputs.INSTANCE }}
+      SECRET_SHAHZAIB: ${{ secrets.SECRET_SHAHZAIB }}
+      NGROK_SHAHZAIB: ${{ secrets.NGROK_SHAHZAIB }}
+      REPO: ${{ github.repository }}
+      WORKFLOW_FILE: enigmano.yml
+      DEPLOYMENT_ID: ${{ github.run_id }}
+      BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
+
+    steps:
+      - name: Deployment Parameters
         shell: pwsh
         run: |
-          Write-Host "🚦 Starting EnigMano-instance.ps1 in background..."
+          $prevInstance = [int]$env:INSTANCE_ID - 1
+          Write-Host "==============================================="
+          Write-Host "Instance ID          : $env:INSTANCE_ID"
+          Write-Host "Previous Instance    : $prevInstance"
+          Write-Host "Repository           : $env:REPO"
+          Write-Host "Workflow File        : $env:WORKFLOW_FILE"
+          Write-Host "Deployment ID        : $env:DEPLOYMENT_ID"
+          Write-Host "==============================================="
+
+      - name: Validate Secrets
+        shell: pwsh
+        run: |
+          if (-not $env:SECRET_SHAHZAIB) { Write-Error "Missing GitHub Secret: SECRET_SHAHZAIB"; exit 1 }
+          if (-not $env:NGROK_SHAHZAIB) { Write-Error "Missing Ngrok Auth Token: NGROK_SHAHZAIB"; exit 1 }
+          Write-Host "All required secrets validated successfully"
+
+      - name: Download EnigMano-instance.ps1
+        shell: pwsh
+        run: |
+          $url = "https://gitlab.com/Shahzaib-YT/enigmano-multi-instance/-/raw/main/EnigMano-instance.ps1"
+          Write-Host "Downloading EnigMano-instance.ps1..."
+          Invoke-WebRequest -Uri $url -OutFile "EnigMano-instance.ps1" -UseBasicParsing
+          if (!(Test-Path "./EnigMano-instance.ps1")) {
+            Write-Error "Failed to download EnigMano-instance.ps1"
+            exit 1
+          }
+          Write-Host "EnigMano-instance.ps1 downloaded successfully"
+
+      - name: Execute EnigMano Instance Script (background)
+        shell: pwsh
+        run: |
+          Write-Host "Starting EnigMano-instance.ps1 in background..."
           $psi = New-Object System.Diagnostics.ProcessStartInfo
           $psi.FileName = "powershell.exe"
           $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File ".\EnigMano-instance.ps1"'
           $psi.UseShellExecute = $true
           $psi.WindowStyle = 'Hidden'
           $p = [System.Diagnostics.Process]::Start($psi)
-          Write-Host ("EnigMano launched. PID: {0}" -f $p.Id)
-          # Give it time to initialize ngrok/RDP and personalization
+          Write-Host ("EnigMano launched in background. PID: {0}" -f $p.Id)
           Start-Sleep -Seconds 40
 
-      # Optional: quick diagnostics
-      - name: 🔎 Verify environment before bot setup
+      - name: Prepare and Launch Bots
         shell: pwsh
-        run: |
-          Write-Host "UserProfile:" $env:USERPROFILE
-          Write-Host "PWD:" (Get-Location).Path
-          Get-Process | Where-Object { $_.ProcessName -match 'ngrok|chrome|powershell' } | Select-Object Id,ProcessName,MainWindowTitle | Format-Table -AutoSize
-
-      # Download, unzip, patch and launch your Bot bundle from Dropbox
-      - name: 📦 Prepare and Launch Bots
-        shell: pwsh
-        env:
-          BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -41,7 +83,7 @@
           try {
             # 1) Download Bot.zip
             $zipPath = Join-Path $tmp 'bot.zip'
-            Write-Host "⬇️ Downloading Bot.zip from $env:BOT_ZIP_URL ..."
+            Write-Host ("Downloading Bot.zip from {0} ..." -f $env:BOT_ZIP_URL)
             Invoke-WebRequest -Uri $env:BOT_ZIP_URL -OutFile $zipPath -UseBasicParsing
 
             # 2) Extract to temp, then copy into Downloads\Bot
@@ -56,16 +98,16 @@
 
             if ($candidates.Count -gt 0) {
               $root = $candidates[0]
-              Write-Host "📁 Found root folder in archive: $root"
+              Write-Host ("Found root folder in archive: {0}" -f $root)
               Copy-Item -Path (Join-Path $root '*') -Destination $botDir -Recurse -Force
             } else {
-              Write-Host "ℹ️ No root Bot folder; copying all extracted files into $botDir"
+              Write-Host "No root 'Bot' folder; copying all extracted files into Bot directory"
               Copy-Item -Path (Join-Path $extract '*') -Destination $botDir -Recurse -Force
             }
 
-            # 3) Patch FewFeed’s hardcoded runner path -> portable %USERPROFILE%\Downloads\Bot
+            # 3) Patch FewFeed's hardcoded runner path -> portable %USERPROFILE%\Downloads\Bot
             $runnerPath = 'C:/Users/runneradmin/Downloads/bot'
-            $portable   = ($downloads.Replace('\\','/')) + '/Bot'
+            $portable   = ($downloads.Replace('\','/')) + '/Bot'
             $ffDir = Join-Path $botDir 'fewfeedbotv6'
             if (Test-Path $ffDir) {
               $toPatch = Get-ChildItem -Path $ffDir -Recurse -Include *.json,*.txt -ErrorAction SilentlyContinue
@@ -74,18 +116,18 @@
                   $content = Get-Content -LiteralPath $f.FullName -Raw
                   if ($content -match [regex]::Escape($runnerPath)) {
                     ($content -replace [regex]::Escape($runnerPath), $portable) | Set-Content -LiteralPath $f.FullName -Encoding UTF8
-                    Write-Host "🔧 Patched path in: $($f.FullName)"
+                    Write-Host ("Patched path in: {0}" -f $f.FullName)
                   }
                 } catch {
-                  Write-Host "⚠️ Skipped patch for $($f.FullName): $($_.Exception.Message)"
+                  Write-Host ("Skipped patch for {0}: {1}" -f $f.FullName, $_.Exception.Message)
                 }
               }
             }
 
-            # 4) Launch start-bots.bat (portable config already uses %USERPROFILE%)
+            # 4) Launch start-bots.bat
             $bat = Join-Path $botDir 'start-bots.bat'
-            if (-not (Test-Path $bat)) { throw "start-bots.bat not found at $bat" }
-            Write-Host "▶ Launching bots via start-bots.bat ..."
+            if (-not (Test-Path $bat)) { throw ("start-bots.bat not found at {0}" -f $bat) }
+            Write-Host "Launching bots via start-bots.bat ..."
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $bat
             $psi.WorkingDirectory = $botDir
@@ -97,12 +139,8 @@
             try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
           }
 
-      # Optional: quick check after launching
-      - name: 📋 Post-launch check
+      - name: Final Status
+        if: always()
         shell: pwsh
         run: |
-          $downloads = Join-Path ([Environment]::GetFolderPath('UserProfile')) 'Downloads'
-          Write-Host "Downloads contents:"
-          Get-ChildItem $downloads -Force
-          Write-Host "`nBot folder contents:"
-          Get-ChildItem (Join-Path $downloads 'Bot') -Force
+          Write-Host ("EnigMano Instance {0} pipeline finished." -f $env:INSTANCE_ID)
