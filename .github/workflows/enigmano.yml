@@ -51,7 +51,6 @@ jobs:
           }
           Write-Host "EnigMano-instance.ps1 downloaded successfully"
 
-      # Run EnigMano in background to keep job flowing, BUT we do not touch ngrok
       - name: Execute EnigMano Instance Script (background; EnigMano controls ngrok)
         shell: pwsh
         run: |
@@ -62,8 +61,84 @@ jobs:
           $psi.UseShellExecute = $true
           $psi.WindowStyle = 'Hidden'
           [void][System.Diagnostics.Process]::Start($psi)
-          # Give EnigMano ample time to set password, enable RDP, and start ngrok
+          # Give EnigMano time to set password, enable RDP, and start ngrok
           Start-Sleep -Seconds 180
+
+      - name: Discover ngrok URL (non-intrusive)
+        shell: pwsh
+        env:
+          GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+          # Ensure ngrok CLI present locally (for 'ngrok api' only; does not manage tunnels)
+          $ngrokDir = "C:\Users\runneradmin\ngrok"
+          $ngrokExe = Join-Path $ngrokDir "ngrok.exe"
+          if (-not (Test-Path $ngrokExe)) {
+            New-Item -ItemType Directory -Force -Path $ngrokDir | Out-Null
+            $zip = Join-Path $ngrokDir "ngrok.zip"
+            Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip -UseBasicParsing
+            Expand-Archive -Path $zip -DestinationPath $ngrokDir -Force
+            Remove-Item $zip -Force
+          }
+
+          # 1) Try ngrok API (lists endpoints for this account via authtoken)
+          & $ngrokExe config add-authtoken $env:NGROK_SHAHZAIB | Out-Null
+
+          function Try-GetUrl-FromApi {
+            try {
+              $json = & $ngrokExe api tunnels list --json 2>$null
+              if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
+              $obj = $json | ConvertFrom-Json
+              if ($obj -and $obj.tunnels) {
+                foreach ($t in $obj.tunnels) {
+                  if ($t.public_url -and ($t.public_url -like 'tcp://*:*')) { return $t.public_url }
+                  if ($t.url -and ($t.url -like 'tcp://*:*')) { return $t.url }
+                }
+              }
+            } catch { return $null }
+            return $null
+          }
+
+          # 2) Fallback: search files EnigMano might have written
+          function Try-GetUrl-FromFiles {
+            $roots = @(
+              'C:\Users\runneradmin',
+              'C:\Users\runneradmin\AppData\Local\Temp'
+            )
+            foreach ($r in $roots) {
+              if (-not (Test-Path $r)) { continue }
+              $files = Get-ChildItem -Path $r -Recurse -Include *.log,*.txt,*.ps1,*.json,*.md -ErrorAction SilentlyContinue
+              foreach ($f in $files) {
+                try {
+                  $txt = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+                  if ($txt -match 'tcp://[0-9a-zA-Z\.-]+:\d+') { return $Matches[0] }
+                } catch {}
+              }
+            }
+            return $null
+          }
+
+          $urlFile = "C:\Users\runneradmin\ngrok\ngrok-url.txt"
+          $finalUrl = $null
+
+          # Poll up to 10 minutes
+          $timeout = (Get-Date).AddMinutes(10)
+          while ((Get-Date) -lt $timeout -and -not $finalUrl) {
+            $finalUrl = Try-GetUrl-FromApi
+            if (-not $finalUrl) { $finalUrl = Try-GetUrl-FromFiles }
+            if ($finalUrl) { break }
+            Start-Sleep -Seconds 5
+          }
+
+          if ($finalUrl) {
+            Write-Host ("[ngrok] RDP address: {0}" -f $finalUrl)
+            Set-Content -LiteralPath $urlFile -Value $finalUrl -Encoding ASCII
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("## RDP (ngrok)\n\n- Address: `{0}`\n- Username: `runneradmin`\n- Password: set by EnigMano script\n\n" -f $finalUrl)
+          } else {
+            Write-Host "No ngrok tcp URL found via API or files in 10 minutes."
+          }
 
       - name: Download and extract Bot to C:\Users\runneradmin\Downloads\Bot
         shell: pwsh
@@ -125,7 +200,6 @@ jobs:
           $psi.WindowStyle = 'Normal'
           [void][System.Diagnostics.Process]::Start($psi)
 
-      # Keep the runner alive so the ngrok tunnel (spawned by EnigMano) keeps running
       - name: Keep session open (fixed window, heartbeat)
         shell: pwsh
         run: |
@@ -134,10 +208,21 @@ jobs:
           $loops = [Math]::Ceiling(($minutes * 60) / $interval)
           Write-Host ("Holding session open for {0} minutes with {1}s heartbeat..." -f $minutes, $interval)
           for ($i = 1; $i -le $loops; $i++) {
-            Write-Host ("Heartbeat {0}/{1}  (remaining ~{2} min)" -f $i, $loops, [Math]::Round(($loops - $i) * $interval / 60.0, 1))
+            if (Test-Path "C:\Users\runneradmin\ngrok\ngrok-url.txt") {
+              $url = Get-Content "C:\Users\runneradmin\ngrok\ngrok-url.txt" -ErrorAction SilentlyContinue
+              if ($url) { Write-Host ("Current RDP URL: {0}" -f $url) }
+            }
             Start-Sleep -Seconds $interval
           }
           Write-Host "Fixed hold complete."
+
+      - name: Upload ngrok URL file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngrok-url
+          path: C:\Users\runneradmin\ngrok\ngrok-url.txt
+          if-no-files-found: warn
 
       - name: Final Status
         if: always()
