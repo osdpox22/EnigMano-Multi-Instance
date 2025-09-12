@@ -70,52 +70,39 @@ jobs:
             Remove-Item $zip -Force
           }
 
-          # 3) Auth and logs
+          # 3) Authenticate
           & $ngrokExe config add-authtoken $env:NGROK_SHAHZAIB | Out-Null
 
+          # 4) Prepare log files
           $logFile = Join-Path $ngrokDir "ngrok.log"
           $urlFile = Join-Path $ngrokDir "ngrok-url.txt"
-          if (Test-Path $logFile) { Clear-Content $logFile -ErrorAction SilentlyContinue }
-          if (Test-Path $urlFile) { Clear-Content $urlFile -ErrorAction SilentlyContinue }
+          if (Test-Path $logFile) { Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue }
+          if (Test-Path $urlFile) { Remove-Item -LiteralPath $urlFile -Force -ErrorAction SilentlyContinue }
 
+          # Helper: let ngrok write its own log file (avoids file lock)
           function Start-Ngrok {
-            param([string]$Args = "tcp 3389 --log=stdout")
+            param([string]$Args = "tcp 3389 --log=`"$logFile`" --log-format=logfmt --log-level=info")
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $ngrokExe
             $psi.Arguments = $Args
-            $psi.UseShellExecute = $false
-            $psi.RedirectStandardOutput = $true
+            $psi.UseShellExecute = $true
             $psi.CreateNoWindow = $true
-            $proc = New-Object System.Diagnostics.Process
-            $proc.StartInfo = $psi
-            [void]$proc.Start()
-
-            # async copy stdout -> log file
-            $sw = New-Object System.IO.StreamWriter($logFile, $true)
-            Start-Job -ScriptBlock {
-              param($p, $writer)
-              try {
-                while (-not $p.HasExited) {
-                  $line = $p.StandardOutput.ReadLine()
-                  if ($null -ne $line) { $writer.WriteLine($line); $writer.Flush() }
-                }
-              } finally { $writer.Flush(); $writer.Dispose() }
-            } -ArgumentList $proc, $sw | Out-Null
-
-            return $proc
+            [System.Diagnostics.Process]::Start($psi) | Out-Null
           }
 
-          # 4) Monitor ngrok and keep URL published for 180 minutes
+          # 5) Monitor ngrok and keep URL published for 180 minutes
           $monitorMinutes = 180
           $pollSeconds    = 4
           $loops          = [Math]::Ceiling(($monitorMinutes*60) / $pollSeconds)
           $currentUrl     = $null
-          $proc           = Start-Ngrok
-          Write-Host ("ngrok started. PID: {0}" -f $proc.Id)
+
+          Start-Ngrok
+          Write-Host "ngrok started."
 
           for ($i = 1; $i -le $loops; $i++) {
             Start-Sleep -Seconds $pollSeconds
 
+            # Extract URL if present in log; pattern: tcp://host:port
             if (Test-Path $logFile) {
               $txt = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
               if ($txt -match 'tcp://[0-9a-zA-Z\.-]+:\d+') {
@@ -129,10 +116,12 @@ jobs:
               }
             }
 
-            if ($proc.HasExited) {
-              Write-Host "ngrok exited; restarting..."
-              $proc = Start-Ngrok
-              Write-Host ("ngrok restarted. PID: {0}" -f $proc.Id)
+            # If ngrok died, restart it and reset URL so we publish a fresh one
+            $running = Get-Process -Name ngrok -ErrorAction SilentlyContinue
+            if (-not $running) {
+              Write-Host "ngrok not running; restarting..."
+              if (Test-Path $logFile) { Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue }
+              Start-Ngrok
               $currentUrl = $null
             }
           }
