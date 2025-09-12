@@ -64,7 +64,8 @@ jobs:
           $psi.WindowStyle = 'Hidden'
           $p = [System.Diagnostics.Process]::Start($psi)
           Write-Host ("EnigMano launched in background. PID: {0}" -f $p.Id)
-          Start-Sleep -Seconds 40
+          # Allow ngrok/RDP and personalization to fully come up
+          Start-Sleep -Seconds 90
 
       - name: Prepare and Launch Bots
         shell: pwsh
@@ -138,6 +139,31 @@ jobs:
           } finally {
             try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
           }
+
+      - name: Keep session open while RDP/bots are running
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+          $timeoutMinutes = 360
+          $pollSeconds = 20
+
+          Write-Host "Keeping session open for up to $timeoutMinutes minutes while ngrok or bots are running..."
+          $sw = [System.Diagnostics.Stopwatch]::StartNew()
+          while ($sw.Elapsed.TotalMinutes -lt $timeoutMinutes) {
+            $ngrok  = Get-Process -Name ngrok
+            $bots   = @()
+            $bots  += Get-Process -Name "CommentsReplyBot*"
+            $bots  += Get-Process -Name "FewFeedBot3"
+            $bots  += Get-Process -Name "ReplyBot_v3"
+            $chrome = Get-Process -Name chrome
+
+            if (-not $ngrok -and -not $bots -and -not $chrome) {
+              Write-Host "No ngrok/bot/chrome processes detected anymore; ending job."
+              break
+            }
+            Start-Sleep -Seconds $pollSeconds
+          }
+          Write-Host "Keep-alive loop finished (timeout reached or processes ended)."
 
       - name: Final Status
         if: always()
