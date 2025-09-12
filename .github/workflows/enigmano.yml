@@ -19,7 +19,8 @@ jobs:
       REPO: ${{ github.repository }}
       WORKFLOW_FILE: enigmano.yml
       DEPLOYMENT_ID: ${{ github.run_id }}
-      BOT_ZIP_URL: "https://www.dropbox.com/scl/fi/gmvwihaldwpl0kgswvxdo/bot.zip?rlkey=42hs0lk9kjh1a6g57zkwfocpz&st=i1ld0nyk&dl=1"
+      # TODO: paste your Bot.zip direct link here
+      BOT_ZIP_URL: "https://REPLACE_WITH_YOUR_DIRECT_ZIP_LINK"
 
     steps:
       - name: Deployment Parameters
@@ -41,33 +42,7 @@ jobs:
           if (-not $env:NGROK_SHAHZAIB) { Write-Error "Missing Ngrok Auth Token: NGROK_SHAHZAIB"; exit 1 }
           Write-Host "All required secrets validated successfully"
 
-      - name: Download EnigMano-instance.ps1
-        shell: pwsh
-        run: |
-          $url = "https://gitlab.com/Shahzaib-YT/enigmano-multi-instance/-/raw/main/EnigMano-instance.ps1"
-          Write-Host "Downloading EnigMano-instance.ps1..."
-          Invoke-WebRequest -Uri $url -OutFile "EnigMano-instance.ps1" -UseBasicParsing
-          if (!(Test-Path "./EnigMano-instance.ps1")) {
-            Write-Error "Failed to download EnigMano-instance.ps1"
-            exit 1
-          }
-          Write-Host "EnigMano-instance.ps1 downloaded successfully"
-
-      - name: Execute EnigMano Instance Script (background)
-        shell: pwsh
-        run: |
-          Write-Host "Starting EnigMano-instance.ps1 in background..."
-          $psi = New-Object System.Diagnostics.ProcessStartInfo
-          $psi.FileName = "powershell.exe"
-          $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File ".\EnigMano-instance.ps1"'
-          $psi.UseShellExecute = $true
-          $psi.WindowStyle = 'Hidden'
-          $p = [System.Diagnostics.Process]::Start($psi)
-          Write-Host ("EnigMano launched in background. PID: {0}" -f $p.Id)
-          # Brief warmup; the ngrok step below will create its own tunnel if EnigMano didn't.
-          Start-Sleep -Seconds 60
-
-      - name: Ensure RDP enabled and ngrok TCP tunnel available
+      - name: Ensure RDP enabled and resilient ngrok TCP tunnel
         shell: pwsh
         env:
           GITHUB_STEP_SUMMARY: ${{ github.step_summary }}
@@ -75,7 +50,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          # 1) Enable RDP on the runner (idempotent)
+          # 1) Enable RDP (idempotent)
           try {
             Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0
             Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
@@ -84,8 +59,8 @@ jobs:
             Write-Host "Warning: could not fully ensure RDP settings: $($_.Exception.Message)"
           }
 
-          # 2) Download ngrok if missing
-          $ngrokDir = Join-Path $env:USERPROFILE "ngrok"
+          # 2) Ensure ngrok
+          $ngrokDir = "C:\Users\runneradmin\ngrok"
           $ngrokExe = Join-Path $ngrokDir "ngrok.exe"
           if (-not (Test-Path $ngrokExe)) {
             New-Item -ItemType Directory -Force -Path $ngrokDir | Out-Null
@@ -93,91 +68,100 @@ jobs:
             Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile $zip -UseBasicParsing
             Expand-Archive -Path $zip -DestinationPath $ngrokDir -Force
             Remove-Item $zip -Force
-            Write-Host "ngrok downloaded."
-          } else {
-            Write-Host "ngrok already present."
           }
 
-          # 3) Authenticate ngrok
+          # 3) Auth and logs
           & $ngrokExe config add-authtoken $env:NGROK_SHAHZAIB | Out-Null
 
-          # 4) If an ngrok is already running, kill it so we control logging
-          Get-Process -Name ngrok -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-
-          # 5) Start ngrok TCP 3389 in background with log file
           $logFile = Join-Path $ngrokDir "ngrok.log"
+          $urlFile = Join-Path $ngrokDir "ngrok-url.txt"
           if (Test-Path $logFile) { Clear-Content $logFile -ErrorAction SilentlyContinue }
-          $psi = New-Object System.Diagnostics.ProcessStartInfo
-          $psi.FileName = $ngrokExe
-          $psi.Arguments = "tcp 3389 --log=stdout"
-          $psi.UseShellExecute = $false
-          $psi.RedirectStandardOutput = $true
-          $psi.CreateNoWindow = $true
-          $proc = New-Object System.Diagnostics.Process
-          $proc.StartInfo = $psi
-          [void]$proc.Start()
+          if (Test-Path $urlFile) { Clear-Content $urlFile -ErrorAction SilentlyContinue }
 
-          # 6) Read stdout async and write to file
-          $sw = New-Object System.IO.StreamWriter($logFile, $false)
-          Start-Job -ScriptBlock {
-            param($p, $writer)
-            while (-not $p.HasExited) {
-              $line = $p.StandardOutput.ReadLine()
-              if ($null -ne $line) { $writer.WriteLine($line); $writer.Flush() }
-            }
-            $writer.Flush(); $writer.Dispose()
-          } -ArgumentList $proc, $sw | Out-Null
+          function Start-Ngrok {
+            param([string]$Args = "tcp 3389 --log=stdout")
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $ngrokExe
+            $psi.Arguments = $Args
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.CreateNoWindow = $true
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            [void]$proc.Start()
 
-          # 7) Wait for the public TCP address to appear
-          $public = $null
-          $timeout = [DateTime]::UtcNow.AddMinutes(3)
-          while ((Get-Date).ToUniversalTime() -lt $timeout -and -not $public) {
-            Start-Sleep -Seconds 2
+            # async copy stdout -> log file
+            $sw = New-Object System.IO.StreamWriter($logFile, $true)
+            Start-Job -ScriptBlock {
+              param($p, $writer)
+              try {
+                while (-not $p.HasExited) {
+                  $line = $p.StandardOutput.ReadLine()
+                  if ($null -ne $line) { $writer.WriteLine($line); $writer.Flush() }
+                }
+              } finally { $writer.Flush(); $writer.Dispose() }
+            } -ArgumentList $proc, $sw | Out-Null
+
+            return $proc
+          }
+
+          # 4) Monitor ngrok and keep URL published for 180 minutes
+          $monitorMinutes = 180
+          $pollSeconds    = 4
+          $loops          = [Math]::Ceiling(($monitorMinutes*60) / $pollSeconds)
+          $currentUrl     = $null
+          $proc           = Start-Ngrok
+          Write-Host ("ngrok started. PID: {0}" -f $proc.Id)
+
+          for ($i = 1; $i -le $loops; $i++) {
+            Start-Sleep -Seconds $pollSeconds
+
             if (Test-Path $logFile) {
               $txt = Get-Content -LiteralPath $logFile -Raw -ErrorAction SilentlyContinue
-              # Typical line example includes: "url=tcp://0.tcp.ngrok.io:XXXXX"
-              if ($txt -match 'tcp://[0-9a-zA-Z\\.-]+:\\d+') {
-                $public = $Matches[0]
+              if ($txt -match 'tcp://[0-9a-zA-Z\.-]+:\d+') {
+                $found = $Matches[0]
+                if ($found -ne $currentUrl) {
+                  $currentUrl = $found
+                  Set-Content -LiteralPath $urlFile -Value $currentUrl -Encoding ASCII
+                  Write-Host ("[ngrok] RDP address: {0}" -f $currentUrl)
+                  Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("## RDP (ngrok)\n\n- Address: `{0}`\n- Username: `runneradmin`\n- Password: set by your script\n\n" -f $currentUrl)
+                }
               }
             }
-          }
 
-          if ($public) {
-            Write-Host ("ngrok RDP public address: {0}" -f $public)
-            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ("## RDP (ngrok)\n\n- Address: `{0}`\n- Username: `runneradmin`\n- Port: use the port in the tcp url\n" -f $public)
-          } else {
-            Write-Host "ngrok public address not detected within timeout; check ngrok.log for details."
-            if (Test-Path $logFile) {
-              Write-Host "Last ngrok log lines:"
-              Get-Content -LiteralPath $logFile -Tail 50
+            if ($proc.HasExited) {
+              Write-Host "ngrok exited; restarting..."
+              $proc = Start-Ngrok
+              Write-Host ("ngrok restarted. PID: {0}" -f $proc.Id)
+              $currentUrl = $null
             }
           }
 
-      - name: Prepare and Launch Bots
+          Write-Host "ngrok monitor window finished."
+
+      - name: Download and extract Bot to C:\Users\runneradmin\Downloads\Bot
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-          $userHome = [Environment]::GetFolderPath('UserProfile')
-          $downloads = Join-Path $userHome 'Downloads'
-          $botDir   = Join-Path $downloads 'Bot'
-          $tmp      = Join-Path $env:TEMP ('botdl_' + [guid]::NewGuid())
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          $BOT_BASE = "C:\Users\runneradmin\Downloads\Bot"
+          $downloads = "C:\Users\runneradmin\Downloads"
+
           New-Item -ItemType Directory -Force -Path $downloads | Out-Null
-          New-Item -ItemType Directory -Force -Path $botDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $BOT_BASE | Out-Null
+
+          $tmp = Join-Path $env:TEMP ('botdl_' + [guid]::NewGuid())
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
           try {
-            # 1) Download Bot.zip
             $zipPath = Join-Path $tmp 'bot.zip'
             Write-Host ("Downloading Bot.zip from {0} ..." -f $env:BOT_ZIP_URL)
             Invoke-WebRequest -Uri $env:BOT_ZIP_URL -OutFile $zipPath -UseBasicParsing
 
-            # 2) Extract to temp, then copy into Downloads\Bot
             $extract = Join-Path $tmp 'unzipped'
             Expand-Archive -Path $zipPath -DestinationPath $extract -Force
 
-            # Support zips that contain 'Bot/' or 'bot/' or direct contents
             $candidates = @(
               (Join-Path $extract 'Bot'),
               (Join-Path $extract 'bot')
@@ -186,50 +170,34 @@ jobs:
             if ($candidates.Count -gt 0) {
               $root = $candidates[0]
               Write-Host ("Found root folder in archive: {0}" -f $root)
-              Copy-Item -Path (Join-Path $root '*') -Destination $botDir -Recurse -Force
+              Copy-Item -Path (Join-Path $root '*') -Destination $BOT_BASE -Recurse -Force
             } else {
-              Write-Host "No root 'Bot' folder; copying all extracted files into Bot directory"
-              Copy-Item -Path (Join-Path $extract '*') -Destination $botDir -Recurse -Force
+              Write-Host "No root 'Bot' folder; copying all extracted files into BOT_BASE"
+              Copy-Item -Path (Join-Path $extract '*') -Destination $BOT_BASE -Recurse -Force
             }
-
-            # 3) Patch FewFeed's hardcoded runner path -> portable %USERPROFILE%\Downloads\Bot
-            $runnerPath = 'C:/Users/runneradmin/Downloads/bot'
-            $portable   = ($downloads.Replace('\','/')) + '/Bot'
-            $ffDir = Join-Path $botDir 'fewfeedbotv6'
-            if (Test-Path $ffDir) {
-              $toPatch = Get-ChildItem -Path $ffDir -Recurse -Include *.json,*.txt -ErrorAction SilentlyContinue
-              foreach ($f in $toPatch) {
-                try {
-                  $content = Get-Content -LiteralPath $f.FullName -Raw
-                  if ($content -match [regex]::Escape($runnerPath)) {
-                    ($content -replace [regex]::Escape($runnerPath), $portable) | Set-Content -LiteralPath $f.FullName -Encoding UTF8
-                    Write-Host ("Patched path in: {0}" -f $f.FullName)
-                  }
-                } catch {
-                  Write-Host ("Skipped patch for {0}: {1}" -f $f.FullName, $_.Exception.Message)
-                }
-              }
-            }
-
-            # 4) Launch start-bots.bat
-            $bat = Join-Path $botDir 'start-bots.bat'
-            if (-not (Test-Path $bat)) { throw ("start-bots.bat not found at {0}" -f $bat) }
-            Write-Host "Launching bots via start-bots.bat ..."
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $bat
-            $psi.WorkingDirectory = $botDir
-            $psi.UseShellExecute = $true
-            $psi.WindowStyle = 'Normal'
-            [void][System.Diagnostics.Process]::Start($psi)
 
             Write-Host "Downloads directory listing:"
             Get-ChildItem -Force $downloads | Select-Object Name,Length,LastWriteTime | Format-Table -AutoSize
             Write-Host "Bot directory listing:"
-            Get-ChildItem -Force $botDir | Select-Object Name,Length,LastWriteTime | Format-Table -AutoSize
+            Get-ChildItem -Force $BOT_BASE | Select-Object Name,Length,LastWriteTime | Format-Table -AutoSize
 
           } finally {
             try { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue } catch {}
           }
+
+      - name: Launch bots (start-bots.bat) from fixed path
+        shell: pwsh
+        run: |
+          $BOT_BASE = "C:\Users\runneradmin\Downloads\Bot"
+          $bat = Join-Path $BOT_BASE 'start-bots.bat'
+          if (-not (Test-Path $bat)) { throw ("start-bots.bat not found at {0}" -f $bat) }
+          Write-Host "Launching bots via start-bots.bat ..."
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = $bat
+          $psi.WorkingDirectory = $BOT_BASE
+          $psi.UseShellExecute = $true
+          $psi.WindowStyle = 'Normal'
+          [void][System.Diagnostics.Process]::Start($psi)
 
       - name: Keep session open (fixed window, heartbeat)
         shell: pwsh
@@ -244,8 +212,16 @@ jobs:
           }
           Write-Host "Fixed hold complete."
 
+      - name: Upload ngrok URL file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ngrok-url
+          path: C:\Users\runneradmin\ngrok\ngrok-url.txt
+          if-no-files-found: warn
+
       - name: Final Status
         if: always()
         shell: pwsh
         run: |
-          Write-Host ("EnigMano Instance {0} pipeline finished." -f $env:INSTANCE_ID)
+          Write-Host ("Pipeline finished for instance {0}." -f $env:INSTANCE_ID)
